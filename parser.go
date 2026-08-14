@@ -86,11 +86,11 @@ func (p *parser) ParseQuery(query string) (Matcher, error) {
 
 // tokenize разбивает запрос на токены.
 func tokenize(input string) ([]token, error) {
-	lx := newLexer(input)
+	lex := newLexer(input)
 	tokens := make([]token, 0, 16)
 
 	for {
-		tok := lx.scan()
+		tok := lex.scan()
 		if tok.typ == tokEOF {
 			break
 		}
@@ -107,6 +107,20 @@ func tokenize(input string) ([]token, error) {
 }
 
 // parseOrExpression разбирает выражение с учётом приоритета OR.
+//
+// Приоритеты операторов (от низшего к высшему):
+//   1. OR / || (низший приоритет)
+//   2. AND / &&
+//   3. NOT / !
+//   4. + / - (унарные)
+//   5. Термы, фразы, скобки (высший приоритет)
+//
+// Алгоритм:
+//   1. Рекурсивно вызывает parseAndExpression для левого операнда
+//   2. Пока видит оператор OR, читает правый операнд
+//   3. Строит AST: (left OR right)
+//
+// Это обеспечивает правильный приоритет: a OR b AND c = a OR (b AND c)
 func (ps *ParserState) parseOrExpression() (QueryNode, error) {
 	left, err := ps.parseAndExpression()
 	if err != nil {
@@ -132,6 +146,20 @@ func isOrOperator(tok token) bool {
 }
 
 // parseAndExpression разбирает выражение с учётом приоритета AND.
+//
+// Алгоритм (низкоуровневый рекурсивный спуск):
+//   1. Считывает левый операнд через parseNotExpression
+//   2. В цикле проверяет текущий токен:
+//      - AND / && — явно, объединяет через BooleanAND
+//      - NOT / ! — преобразует в BooleanNOT, затем AND
+//      - - — prohibited, преобразует в BooleanMUSTNOT
+//      - Term/Phrase — неявный AND (a b = a AND b)
+//      - + — required term, преобразует в BooleanMUST
+//      - ( — неявный AND перед группой
+//   3. При любом другом токене завершает цикл
+//   4. Возвращает накопленное выражение
+//
+// Поддерживает левую рекурсию: a AND b AND c = ((a AND b) AND c)
 func (ps *ParserState) parseAndExpression() (QueryNode, error) {
 	left, err := ps.parseNotExpression()
 	if err != nil {
@@ -243,7 +271,17 @@ func (ps *ParserState) parseAndExpression() (QueryNode, error) {
 	return left, nil
 }
 
-// parseNotExpression разбирает NOT и унарные операторы.
+// parseNotExpression разбирает NOT и унарные операторы (+, -).
+//
+// Алгоритм:
+//   1. Проверяет текущий токен:
+//      - NOT — рекурсивно вызывает parseNotExpression для правого операнда
+//      - ! — вызывает parsePrimary для правого операнда
+//      - + — required, вызывает parsePrimary
+//      - - — prohibited, вызывает parsePrimary
+//   2. Если унарных операторов нет — вызывает parsePrimary
+//
+// Поддерживает цепочки: a NOT NOT b = NOT(NOT(a, b))
 func (ps *ParserState) parseNotExpression() (QueryNode, error) {
 	tok := ps.currentToken()
 
@@ -296,7 +334,22 @@ func (ps *ParserState) parseNotExpression() (QueryNode, error) {
 	return ps.parsePrimary()
 }
 
-// parsePrimary разбирает первичные элементы.
+// parsePrimary разбирает первичные элементы запроса.
+//
+// Это высший уровень приоритета — термы, фразы и группировки.
+//
+// Алгоритм:
+//   1. Term → buildTermQuery (обработка wildcard, fuzzy)
+//   2. Phrase → PhraseQuery (разбивка по словам)
+//   3. (expr) — рекурсивный вызов parseOrExpression, проверка закрывающей скобки
+//   4. [a TO b] — RangeQuery с включёнными границами
+//   5. {a TO b} — RangeQuery с исключёнными границами
+//   6. Неизвестный токен → ConstantQuery{true} (fallback)
+//
+// Обработка ошибок:
+//   - Незакрытая скобка → ошибка
+//   - Отсутствие TO в range query → ошибка
+//   - Незакрытый range → ошибка
 func (ps *ParserState) parsePrimary() (QueryNode, error) {
 	tok := ps.currentToken()
 
@@ -386,6 +439,14 @@ func (ps *ParserState) currentToken() token {
 }
 
 // buildTermQuery создаёт TermQuery из параметров.
+//
+// Алгоритм:
+//   1. Создаёт базовый TermQuery с термом
+//   2. Если wildcard=true — устанавливает флаг Wildcard
+//   3. Если fuzzy=true — устанавливает Fuzzy и FuzzyDistance
+//   4. Если fuzzyDistance=0 (авто) — ставит значение по умолчанию 2
+//
+// Ограничение: fuzzyDistance никогда не превышает 2
 func buildTermQuery(term string, wildcard, fuzzy bool, fuzzyDistance int) QueryNode {
 	tq := &TermQuery{Term: term}
 	if wildcard {
@@ -411,22 +472,22 @@ type lexer struct {
 
 func newLexer(input string) *lexer {
 	runes := []rune(input)
-	lx := &lexer{
+	lex := &lexer{
 		runes:  runes,
 		length: len(runes),
 	}
-	if lx.length > 0 {
-		lx.current = lx.runes[0]
+	if lex.length > 0 {
+		lex.current = lex.runes[0]
 	}
-	return lx
+	return lex
 }
 
-func (l *lexer) next() {
-	l.pos++
-	if l.pos < l.length {
-		l.current = l.runes[l.pos]
+func (lex *lexer) next() {
+	lex.pos++
+	if lex.pos < lex.length {
+		lex.current = lex.runes[lex.pos]
 	} else {
-		l.current = 0
+		lex.current = 0
 	}
 }
 
@@ -442,149 +503,175 @@ func isDelimiter(r rune) bool {
 	return isSpace(r)
 }
 
-func (l *lexer) skipWhitespace() {
-	for l.pos < l.length && isSpace(l.current) {
-		l.next()
+func (lex *lexer) skipWhitespace() {
+	for lex.pos < lex.length && isSpace(lex.current) {
+		lex.next()
 	}
 }
 
-func (l *lexer) scan() token {
-	l.skipWhitespace()
+// scan сканирует входную строку и возвращает следующий токен.
+//
+// Алгоритм лексера:
+//   1. Пропускает пробельные символы
+//   2. Проверяет специальные символы: ( ) [ ] { } ^ ~ + -
+//   3. Распознаёт составные операторы: || → OR, && → AND
+//   4. Вызывает scanPhrase для строк в кавычках
+//   5. Вызывает scanTO/scanKeyword для ключевых слов TO, AND, OR, NOT
+//   6. Вызывает scanTerm для термов (с обработкой экранирования)
+//   7. Возвращает EOF при конце ввода
+//
+// Экранирование: \x превращается в терм x
+func (lex *lexer) scan() token {
+	lex.skipWhitespace()
 
-	if l.pos >= l.length {
+	if lex.pos >= lex.length {
 		return token{typ: tokEOF}
 	}
 
-	switch l.current {
+	switch lex.current {
 	case '(':
-		l.next()
+		lex.next()
 		return token{typ: tokLParen}
 	case ')':
-		l.next()
+		lex.next()
 		return token{typ: tokRParen}
 	case '[':
-		l.next()
+		lex.next()
 		return token{typ: tokBracketL}
 	case ']':
-		l.next()
+		lex.next()
 		return token{typ: tokBracketR}
 	case '{':
-		l.next()
+		lex.next()
 		return token{typ: tokCurlyL}
 	case '}':
-		l.next()
+		lex.next()
 		return token{typ: tokCurlyR}
 	case '^':
-		l.next()
+		lex.next()
 		return token{typ: tokCaret}
 	case '~':
-		l.next()
+		lex.next()
 		return token{typ: tokTilde}
 	case '+':
-		l.next()
+		lex.next()
 		return token{typ: tokPlus}
 	case '-':
-		l.next()
+		lex.next()
 		return token{typ: tokMinus}
 	case '|':
-		l.next()
-		if l.pos < l.length && l.current == '|' {
-			l.next()
+		lex.next()
+		if lex.pos < lex.length && lex.current == '|' {
+			lex.next()
 			return token{typ: tokOperator, value: "OR"}
 		}
 		return token{typ: tokOperator, value: "|"}
 	case '&':
-		l.next()
-		if l.pos < l.length && l.current == '&' {
-			l.next()
+		lex.next()
+		if lex.pos < lex.length && lex.current == '&' {
+			lex.next()
 			return token{typ: tokOperator, value: "AND"}
 		}
 		return token{typ: tokOperator, value: "&"}
 	case '!':
-		l.next()
+		lex.next()
 		return token{typ: tokOperator, value: "!"}
 	case '"':
-		return l.scanPhrase()
+		return lex.scanPhrase()
 	case 'T', 't':
-		return l.scanTO()
+		return lex.scanTO()
 	case 'A', 'a':
-		return l.scanKeyword("AND")
+		return lex.scanKeyword("AND")
 	case 'O', 'o':
-		return l.scanKeyword("OR")
+		return lex.scanKeyword("OR")
 	case 'N', 'n':
-		return l.scanKeyword("NOT")
+		return lex.scanKeyword("NOT")
 	case '\\':
-		l.next()
-		if l.pos >= l.length {
+		lex.next()
+		if lex.pos >= lex.length {
 			return token{typ: tokTerm, value: "\\"}
 		}
-		esc := l.current
-		l.next()
+		esc := lex.current
+		lex.next()
 		return token{typ: tokTerm, value: string(esc)}
 	default:
-		return l.scanTerm()
+		return lex.scanTerm()
 	}
 }
 
-func (l *lexer) scanPhrase() token {
-	l.next()
-	var sb strings.Builder
+func (lex *lexer) scanPhrase() token {
+	lex.next()
+	var builder strings.Builder
 
-	for l.pos < l.length && l.current != '"' {
-		if l.current == '\\' {
-			l.next()
-			if l.pos < l.length && l.current != 0 {
-				sb.WriteString(string(l.current))
-				l.next()
+	for lex.pos < lex.length && lex.current != '"' {
+		if lex.current == '\\' {
+			lex.next()
+			if lex.pos < lex.length && lex.current != 0 {
+				builder.WriteString(string(lex.current))
+				lex.next()
 			}
 			continue
 		}
-		sb.WriteRune(l.current)
-		l.next()
+		builder.WriteRune(lex.current)
+		lex.next()
 	}
 
-	if l.pos >= l.length {
+	if lex.pos >= lex.length {
 		return token{typ: tokEOF}
 	}
 
-	l.next()
-	return token{typ: tokPhrase, value: sb.String()}
+	lex.next()
+	return token{typ: tokPhrase, value: builder.String()}
 }
 
-func (l *lexer) scanTerm() token {
-	var sb strings.Builder
+func (lex *lexer) scanTerm() token {
+	var builder strings.Builder
 
-	for l.pos < l.length && !isSpace(l.current) && !isDelimiter(l.current) {
-		if l.current == '\\' {
-			l.next()
-			if l.pos < l.length && l.current != 0 {
-				sb.WriteString(string(l.current))
-				l.next()
+	for lex.pos < lex.length && !isSpace(lex.current) && !isDelimiter(lex.current) {
+		if lex.current == '\\' {
+			lex.next()
+			if lex.pos < lex.length && lex.current != 0 {
+				builder.WriteString(string(lex.current))
+				lex.next()
 			}
 			continue
 		}
-		sb.WriteRune(l.current)
-		l.next()
+		builder.WriteRune(lex.current)
+		lex.next()
 	}
 
-	value := sb.String()
+	value := builder.String()
 	if len(value) == 0 {
 		return token{typ: tokEOF}
 	}
 
-	return l.parseTermModifiers(value)
+	return lex.parseTermModifiers(value)
 }
 
-func (l *lexer) parseTermModifiers(raw string) token {
+// parseTermModifiers обрабатывает модификаторы термов: fuzzy (~) и wildcards (?, *).
+//
+// Алгоритм:
+//   1. Проверяет окончание ~ для fuzzy поиска:
+//      - fuzzyDistance из цифры после ~ (0-2, по умолчанию 2)
+//      - Удаляет ~ из значения терма
+//   2. Проверяет наличие ? или * в терме для wildcards
+//   3. Возвращает токен с установленными флагами
+//
+// Примеры:
+//   - roam~ → fuzzy, distance=2
+//   - roam~1 → fuzzy, distance=1
+//   - test* → wildcard
+//   - te?t → wildcard
+func (lex *lexer) parseTermModifiers(raw string) token {
 	runes := []rune(raw)
-	n := len(runes)
+	runesCount := len(runes)
 	t := token{typ: tokTerm, value: raw}
 
-	if n > 0 && runes[n-1] == '~' {
+	if runesCount > 0 && runes[runesCount-1] == '~' {
 		t.Fuzzy = true
-		t.value = string(runes[:n-1])
-		if n > 1 && runes[n-2] >= '0' && runes[n-2] <= '9' {
-			_, err := fmt.Sscanf(string(runes[n-2:n]), "%d", &t.FuzzyDistance)
+		t.value = string(runes[:runesCount-1])
+		if runesCount > 1 && runes[runesCount-2] >= '0' && runes[runesCount-2] <= '9' {
+			_, err := fmt.Sscanf(string(runes[runesCount-2:runesCount]), "%d", &t.FuzzyDistance)
 			if err != nil {
 				t.FuzzyDistance = 2
 			} else if t.FuzzyDistance > 2 {
@@ -594,7 +681,7 @@ func (l *lexer) parseTermModifiers(raw string) token {
 		return t
 	}
 
-	for i := 0; i < n; i++ {
+	for i := 0; i < runesCount; i++ {
 		if runes[i] == '*' || runes[i] == '?' {
 			t.Wildcard = true
 			// Не убираем wildcards — они нужны для matchWildcard
@@ -605,50 +692,50 @@ func (l *lexer) parseTermModifiers(raw string) token {
 	return t
 }
 
-func (l *lexer) scanKeyword(expected string) token {
-	var sb strings.Builder
-	startPos := l.pos
+func (lex *lexer) scanKeyword(expected string) token {
+	var builder strings.Builder
+	startIndex := lex.pos
 
-	for l.pos < l.length {
-		sb.WriteRune(l.current)
-		l.next()
-		if isSpace(l.current) || isDelimiter(l.current) {
+	for lex.pos < lex.length {
+		builder.WriteRune(lex.current)
+		lex.next()
+		if isSpace(lex.current) || isDelimiter(lex.current) {
 			break
 		}
 	}
 
-	value := strings.ToUpper(sb.String())
+	value := strings.ToUpper(builder.String())
 	if value == expected {
 		return token{typ: tokOperator, value: value}
 	}
 
-	l.pos = startPos
-	if l.pos < l.length {
-		l.current = l.runes[l.pos]
+	lex.pos = startIndex
+	if lex.pos < lex.length {
+		lex.current = lex.runes[lex.pos]
 	}
-	return l.scanTerm()
+	return lex.scanTerm()
 }
 
-func (l *lexer) scanTO() token {
-	var sb strings.Builder
-	startPos := l.pos
+func (lex *lexer) scanTO() token {
+	var builder strings.Builder
+	startIndex := lex.pos
 
-	for l.pos < l.length {
-		sb.WriteRune(l.current)
-		l.next()
-		if isSpace(l.current) || isDelimiter(l.current) {
+	for lex.pos < lex.length {
+		builder.WriteRune(lex.current)
+		lex.next()
+		if isSpace(lex.current) || isDelimiter(lex.current) {
 			break
 		}
 	}
 
-	value := strings.ToUpper(sb.String())
+	value := strings.ToUpper(builder.String())
 	if value == "TO" {
 		return token{typ: tokTO}
 	}
 
-	l.pos = startPos
-	if l.pos < l.length {
-		l.current = l.runes[l.pos]
+	lex.pos = startIndex
+	if lex.pos < lex.length {
+		lex.current = lex.runes[lex.pos]
 	}
-	return l.scanTerm()
+	return lex.scanTerm()
 }

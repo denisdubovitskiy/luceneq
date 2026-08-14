@@ -11,7 +11,7 @@ type Matcher interface {
 	Match(text string) bool
 }
 
-// Ensure that all QueryNodes implement Matcher.
+// Проверяем, что все QueryNode реализуют Matcher.
 var (
 	_ Matcher = (*TermQuery)(nil)
 	_ Matcher = (*PhraseQuery)(nil)
@@ -154,25 +154,37 @@ func splitWords(text string) []string {
 	return words
 }
 
-// matchWildcard проверяет термин с wildcards (? и *).
+// matchWildcard проверяет термин с wildcards (? и *)
+// с помощью алгоритма динамического программирования.
+//
+// Алгоритм строит DP-таблицу dp[patternLen+1][textLen+1], где:
+//   - dp[i][j] = true, если prefix паттерна длины i совпадает с prefix текста длины j
+//   - Символ ? совпадает с любым одиночным символом
+//   - Символ * совпадает с последовательностью любых символов (включая пустую)
+//
+// Переходы:
+//   - pattern[i-1] == '?' или текст[j-1] == pattern[i-1]: берём dp[i-1][j-1]
+//   - pattern[i-1] == '*': dp[i-1][j] (пропустить *) || dp[i][j-1] (* совпадает с символом)
+//
+// Временная сложность: O(patternLen × textLen)
 func matchWildcard(pattern, text string) bool {
-	pLen := len(pattern)
-	tLen := len(text)
+	patternLen := len(pattern)
+	textLen := len(text)
 
-	if pLen == 0 {
-		return tLen == 0
+	if patternLen == 0 {
+		return textLen == 0
 	}
 
 	// DP таблица
-	dp := make([][]bool, pLen+1)
+	dp := make([][]bool, patternLen+1)
 	for i := range dp {
-		dp[i] = make([]bool, tLen+1)
+		dp[i] = make([]bool, textLen+1)
 	}
 
 	dp[0][0] = true
 
 	// Обработка * в начале
-	for i := 1; i <= pLen; i++ {
+	for i := 1; i <= patternLen; i++ {
 		if pattern[i-1] == '*' {
 			dp[i][0] = dp[i-1][0]
 		} else {
@@ -180,8 +192,8 @@ func matchWildcard(pattern, text string) bool {
 		}
 	}
 
-	for i := 1; i <= pLen; i++ {
-		for j := 1; j <= tLen; j++ {
+	for i := 1; i <= patternLen; i++ {
+		for j := 1; j <= textLen; j++ {
 			switch pattern[i-1] {
 			case '?', text[j-1]:
 				dp[i][j] = dp[i-1][j-1]
@@ -191,31 +203,47 @@ func matchWildcard(pattern, text string) bool {
 		}
 	}
 
-	return dp[pLen][tLen]
+	return dp[patternLen][textLen]
 }
 
-// levenshteinDistance вычисляет расстояние Левенштейна между двумя строками.
+// levenshteinDistance вычисляет расстояние Левенштейна между двумя строками
+// с оптимизацией по памяти — используются только две строки prev и curr.
+//
+// Расстояние Левенштейна — минимальное количество односимвольных операций
+// (вставка, удаление, замена), необходимых для превращения строки a в строку b.
+//
+// Алгоритм:
+//   - prev[j] — расстояние между a[0..i-1] и b[0..j-1]
+//   - curr[j] — расстояние между a[0..i] и b[0..j-1]
+//   - cost = 0, если символы совпадают, иначе 1
+//   - curr[j] = min(curr[j-1]+1, prev[j]+1, prev[j-1]+cost)
+//     - curr[j-1]+1 — вставка
+//     - prev[j]+1 — удаление
+//     - prev[j-1]+cost — замена (или совпадение)
+//
+// Временная сложность: O(len(a) × len(b))
+// Пространственная сложность: O(len(b)) вместо O(len(a) × len(b))
 func levenshteinDistance(a, b string) int {
-	la := len(a)
-	lb := len(b)
+	lenA := len(a)
+	lenB := len(b)
 
-	if la == 0 {
-		return lb
+	if lenA == 0 {
+		return lenB
 	}
-	if lb == 0 {
-		return la
+	if lenB == 0 {
+		return lenA
 	}
 
-	prev := make([]int, lb+1)
-	curr := make([]int, lb+1)
+	prev := make([]int, lenB+1)
+	curr := make([]int, lenB+1)
 
-	for j := 0; j <= lb; j++ {
+	for j := 0; j <= lenB; j++ {
 		prev[j] = j
 	}
 
-	for i := 1; i <= la; i++ {
+	for i := 1; i <= lenA; i++ {
 		curr[0] = i
-		for j := 1; j <= lb; j++ {
+		for j := 1; j <= lenB; j++ {
 			cost := 1
 			if a[i-1] == b[j-1] {
 				cost = 0
@@ -229,22 +257,30 @@ func levenshteinDistance(a, b string) int {
 		prev, curr = curr, prev
 	}
 
-	return prev[lb]
+	return prev[lenB]
 }
 
-// containsConsecutiveWords проверяет, идут ли слова подряд в тексте.
+// containsConsecutiveWords проверяет, идут ли слова из words подряд в тексте.
+//
+// Алгоритм:
+//   1. Разбивает текст на слова через splitWords
+//   2. Перебирает все подпоследовательности длины wordsLen
+//   3. Для каждой подпоследовательности проверяет посимвольное совпадение
+//   4. При полном совпадении возвращает true
+//
+// Временная сложность: O((textWordsLen - wordsLen + 1) × wordsLen)
 func containsConsecutiveWords(text string, words []string) bool {
 	textWords := splitWords(text)
-	tLen := len(textWords)
-	wLen := len(words)
+	textWordsLen := len(textWords)
+	wordsLen := len(words)
 
-	if tLen < wLen {
+	if textWordsLen < wordsLen {
 		return false
 	}
 
-	for i := 0; i <= tLen-wLen; i++ {
+	for i := 0; i <= textWordsLen-wordsLen; i++ {
 		match := true
-		for j := 0; j < wLen; j++ {
+		for j := 0; j < wordsLen; j++ {
 			if textWords[i+j] != words[j] {
 				match = false
 				break
@@ -257,13 +293,25 @@ func containsConsecutiveWords(text string, words []string) bool {
 	return false
 }
 
-// containsPhraseWithSlop проверяет фразу с допустимым смещением слов.
+// containsPhraseWithSlop проверяет, содержит ли текст все слова из words
+// в правильном порядке с допустимым смещением (slop) между словами.
+//
+// Алгоритм:
+//   1. Разбивает текст на слова
+//   2. Проверяет, что в тексте достаточно слов для фразы
+//   3. Делегирует рекурсивный поиск в findPhraseRecursively
+//   4. Перебирает все возможные позиции для каждого слова
+//   5. Проверяет, чтобы gap между соседними словами не превышал slop
+//   6. При нахождении полного совпадения возвращает true
+//
+// Временная сложность: в худшем случае экспоненциальная, но на практике
+// ограничена размером текста и slop.
 func containsPhraseWithSlop(text string, words []string, slop int) bool {
 	textWords := splitWords(text)
-	tLen := len(textWords)
-	wLen := len(words)
+	textWordsLen := len(textWords)
+	wordsLen := len(words)
 
-	if tLen < wLen {
+	if textWordsLen < wordsLen {
 		return false
 	}
 
@@ -272,29 +320,45 @@ func containsPhraseWithSlop(text string, words []string, slop int) bool {
 }
 
 // findPhraseRecursively рекурсивно ищет фразу с учётом slop.
-func findPhraseRecursively(textWords, words []string, tIdx, wIdx, slop, prevTIdx int) bool {
-	if wIdx == len(words) {
+//
+// Алгоритм:
+//   1. Базовый случай: если все слова найдены (wordIdx == len(words)) — возвращает true
+//   2. Тупик: если кончился текст или слов недостаточно — возвращает false
+//   3. Оптимизация: проверяет, осталось ли достаточно слов в тексте
+//   4. Для каждого слова ищет все совпадающие позиции в тексте
+//   5. Проверяет gap между позициями — если > slop, пропускает
+//   6. Рекурсивно продолжает поиск для следующего слова
+//
+// Параметры:
+//   - textWords: слова текста
+//   - words: слова фразы для поиска
+//   - textIdx: текущая позиция в словах текста
+//   - wordIdx: текущее слово фразы, которое ищем
+//   - slop: максимальный допустимый зазор между словами
+//   - prevTextIdx: позиция предыдущего найденного слова в тексте
+func findPhraseRecursively(textWords, words []string, textIdx, wordIdx, slop, prevTextIdx int) bool {
+	if wordIdx == len(words) {
 		return true
 	}
-	if tIdx >= len(textWords) {
+	if textIdx >= len(textWords) {
 		return false
 	}
 
 	// Проверяем, осталось ли достаточно слов
-	if len(textWords)-tIdx < len(words)-wIdx {
+	if len(textWords)-textIdx < len(words)-wordIdx {
 		return false
 	}
 
-	for i := tIdx; i <= len(textWords)-(len(words)-wIdx); i++ {
-		if textWords[i] == words[wIdx] {
+	for i := textIdx; i <= len(textWords)-(len(words)-wordIdx); i++ {
+		if textWords[i] == words[wordIdx] {
 			// Проверяем допустимый slop
-			if wIdx > 0 {
-				gap := i - prevTIdx - 1
+			if wordIdx > 0 {
+				gap := i - prevTextIdx - 1
 				if gap > slop {
 					continue
 				}
 			}
-			if findPhraseRecursively(textWords, words, i+1, wIdx+1, slop, i) {
+			if findPhraseRecursively(textWords, words, i+1, wordIdx+1, slop, i) {
 				return true
 			}
 		}
