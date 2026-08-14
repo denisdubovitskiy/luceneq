@@ -2,6 +2,7 @@ package luceneq
 
 import (
 	"strings"
+	"unicode"
 )
 
 // Matcher определяет интерфейс для проверки совпадения текста.
@@ -132,12 +133,13 @@ func (q *ConstantQuery) Match(_ string) bool {
 }
 
 // splitWords разбивает текст на слова (убирает пунктуацию).
+// Словом считается последовательность Unicode-букв/цифр или '_'.
 func splitWords(text string) []string {
 	var words []string
 	var current strings.Builder
 
 	for _, r := range text {
-		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_' {
 			current.WriteRune(r)
 		} else {
 			if current.Len() > 0 {

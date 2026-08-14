@@ -403,19 +403,20 @@ func buildTermQuery(term string, wildcard, fuzzy bool, fuzzyDistance int) QueryN
 
 // lexer разбивает запрос на токены.
 type lexer struct {
-	input   string
+	runes   []rune
 	pos     int
 	length  int
 	current rune
 }
 
 func newLexer(input string) *lexer {
+	runes := []rune(input)
 	lx := &lexer{
-		input:  input,
-		length: len(input),
+		runes:  runes,
+		length: len(runes),
 	}
 	if lx.length > 0 {
-		lx.current = rune(lx.input[0])
+		lx.current = lx.runes[0]
 	}
 	return lx
 }
@@ -423,7 +424,7 @@ func newLexer(input string) *lexer {
 func (l *lexer) next() {
 	l.pos++
 	if l.pos < l.length {
-		l.current = rune(l.input[l.pos])
+		l.current = l.runes[l.pos]
 	} else {
 		l.current = 0
 	}
@@ -623,7 +624,7 @@ func (l *lexer) scanKeyword(expected string) token {
 
 	l.pos = startPos
 	if l.pos < l.length {
-		l.current = rune(l.input[l.pos])
+		l.current = l.runes[l.pos]
 	}
 	return l.scanTerm()
 }
@@ -647,7 +648,7 @@ func (l *lexer) scanTO() token {
 
 	l.pos = startPos
 	if l.pos < l.length {
-		l.current = rune(l.input[l.pos])
+		l.current = l.runes[l.pos]
 	}
 	return l.scanTerm()
 }
